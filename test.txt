@@ -1,0 +1,339 @@
+# /Users/laztrex/Downloads/reference-app/Cargo.toml
+[package]
+name = "reference-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "baseline"
+harness = false
+
+
+# /Users/laztrex/Downloads/reference-app/test.py
+import os
+import sys
+
+# Расширения файлов, которые заведомо бинарные и не нужны в выводе
+BINARY_EXTENSIONS = {'.o', '.rlib', '.d', '.so', '.dylib', '.dll', '.exe',
+                     '.bin', '.obj', '.pdb', '.wasm', '.gz', '.zip', '.tar',
+                     '.db', '.sqlite', '.pyc', '.pyo', '.parquet', '.arrow'}
+
+def should_exclude_dir(dirname):
+    """Исключаемые каталоги (не заходить внутрь)"""
+    return dirname in ("target", ".git", "node_modules", "__pycache__", "debug", "release")
+
+def should_exclude_file(filename):
+    """Исключаемые файлы по имени или расширению"""
+    if filename in ("Cargo.lock", "Cargo.toml.bak"):
+        return True
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in BINARY_EXTENSIONS
+
+def write_directory_contents_to_file(root_dir, output_file, encoding='utf-8'):
+    with open(output_file, 'w', encoding='utf-8') as out_f:
+        for current_dir, subdirs, files in os.walk(root_dir):
+            # 1. Проверяем имя текущего каталога (не полный путь)
+            dirname = os.path.basename(current_dir)
+            if should_exclude_dir(dirname):
+                # Очищаем список subdirs, чтобы os.walk не заходил внутрь
+                subdirs.clear()
+                continue
+
+            for file in files:
+                if should_exclude_file(file):
+                    continue
+
+                file_path = os.path.join(current_dir, file)
+                out_f.write(f"# {file_path}\n")
+
+                # 2. Дополнительная защита от больших файлов (например, логи)
+                try:
+                    size = os.path.getsize(file_path)
+                    if size > 50 * 1024 * 1024:  # 50 MB
+                        out_f.write(f"[Файл {size//1024//1024} МБ, пропущен]\n")
+                    else:
+                        with open(file_path, 'r', encoding=encoding, errors='replace') as in_f:
+                            content = in_f.read()
+                            out_f.write(content)
+                except Exception as e:
+                    out_f.write(f"[Ошибка чтения файла: {e}]\n")
+                out_f.write("\n\n")
+
+def main():
+    if len(sys.argv) == 1:
+        print("Использование:")
+        print("  python3 test.py <выходной_файл>            # обход текущей папки")
+        print("  python3 test.py <каталог> <выходной_файл>  # обход указанной папки")
+        sys.exit(1)
+
+    if len(sys.argv) == 2:
+        root_dir = os.getcwd()
+        output_file = sys.argv[1]
+    else:
+        root_dir = sys.argv[1]
+        output_file = sys.argv[2]
+        if not os.path.isdir(root_dir):
+            print(f"Ошибка: '{root_dir}' не является каталогом.")
+            sys.exit(1)
+
+    print(f"Обход каталога: {root_dir}")
+    print(f"Исключаются каталоги: target, .git, __pycache__, debug, release")
+    print(f"Исключаются бинарные расширения: {', '.join(sorted(BINARY_EXTENSIONS))}")
+    print(f"Запись результата в: {output_file}")
+    write_directory_contents_to_file(root_dir, output_file)
+    print(f"Готово. Файл создан: {output_file}")
+
+if __name__ == "__main__":
+    main()
+
+# /Users/laztrex/Downloads/reference-app/.gitignore
+/target
+
+
+# /Users/laztrex/Downloads/reference-app/test.txt
+
+
+# /Users/laztrex/Downloads/reference-app/tests/integration.rs
+use reference_app::{algo, leak_buffer, normalize, sum_even};
+
+#[test]
+fn sums_even_numbers() {
+    let nums = [1, 2, 3, 4];
+    assert_eq!(sum_even(&nums), 6);
+}
+
+#[test]
+fn counts_non_zero_bytes() {
+    let data = [0_u8, 1, 0, 2, 3];
+    assert_eq!(leak_buffer(&data), 3);
+}
+
+#[test]
+fn dedup_preserves_uniques() {
+    let uniq = algo::fast_dedup(&[5, 5, 1, 2, 2, 3]);
+    assert_eq!(uniq, vec![1, 2, 3, 5]);
+}
+
+#[test]
+fn fib_small_numbers() {
+    assert_eq!(algo::fast_fib(10), 55);
+}
+
+#[test]
+fn normalize_simple() {
+    assert_eq!(normalize(" Hello World "), "helloworld");
+}
+
+#[test]
+fn averages_only_positive() {
+    let nums = [-5, 5, 15];
+    assert!((reference_app::average_positive(&nums) - 10.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn race_increment_is_correct() {
+    let total = reference_app::concurrency::race_increment(1_000, 4);
+    assert_eq!(total, 4_000);
+}
+
+
+# /Users/laztrex/Downloads/reference-app/scripts/compare.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Бенчмарки референса (для ориентира).
+cargo bench --bench baseline > artifacts/reference_baseline.txt
+
+
+# /Users/laztrex/Downloads/reference-app/scripts/profile.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo build --release
+perf record -g ./target/release/demo || true
+perf report
+
+
+# /Users/laztrex/Downloads/reference-app/benches/baseline.rs
+use reference_app::{algo, sum_even};
+use std::time::Instant;
+
+fn time_it(label: &str, mut f: impl FnMut()) {
+    let start = Instant::now();
+    f();
+    println!("{label}: {:?}", start.elapsed());
+}
+
+fn main() {
+    let data: Vec<i64> = (0..50_000).collect();
+    let fib_n = 32;
+    let dedup_data: Vec<u64> = (0..5_000).flat_map(|n| [n, n]).collect();
+
+    for _ in 0..3 {
+        time_it("sum_even", || {
+            let _ = sum_even(&data);
+        });
+
+        time_it("fast_fib", || {
+            let _ = algo::fast_fib(fib_n);
+        });
+
+        time_it("fast_dedup", || {
+            let _ = algo::fast_dedup(&dedup_data);
+        });
+    }
+}
+
+
+# /Users/laztrex/Downloads/reference-app/benches/criterion.rs
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use reference_app::{algo, sum_even};
+
+fn bench_sum_even(c: &mut Criterion) {
+    let data: Vec<i64> = (0..50_000).collect();
+    c.bench_function("sum_even_fast", |b| b.iter(|| sum_even(&data)));
+}
+
+fn bench_fib(c: &mut Criterion) {
+    c.bench_function("fast_fib", |b| b.iter(|| algo::fast_fib(32)));
+}
+
+fn bench_dedup(c: &mut Criterion) {
+    let data: Vec<u64> = (0..5_000).flat_map(|n| [n, n]).collect();
+    c.bench_function("fast_dedup", |b| {
+        b.iter_batched(
+            || data.clone(),
+            |v| {
+                let _ = algo::fast_dedup(&v);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+criterion_group!(benches, bench_sum_even, bench_fib, bench_dedup);
+criterion_main!(benches);
+
+
+# /Users/laztrex/Downloads/reference-app/src/concurrency.rs
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn race_increment(iterations: usize, threads: usize) -> u64 {
+    COUNTER.store(0, Ordering::SeqCst);
+    let mut handles = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        handles.push(thread::spawn(move || {
+            for _ in 0..iterations {
+                COUNTER.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    COUNTER.load(Ordering::SeqCst)
+}
+
+pub fn read_after_sleep() -> u64 {
+    COUNTER.load(Ordering::SeqCst)
+}
+
+
+# /Users/laztrex/Downloads/reference-app/src/lib.rs
+pub mod algo;
+pub mod concurrency;
+
+/// Безопасная и быстрая версия: без `unsafe`, чистый проход по срезу.
+pub fn sum_even(values: &[i64]) -> i64 {
+    values.iter().copied().filter(|v| v % 2 == 0).sum()
+}
+
+/// Подсчёт ненулевых байтов без утечек.
+pub fn leak_buffer(input: &[u8]) -> usize {
+    input.iter().filter(|b| **b != 0).count()
+}
+
+/// Нормализация: убираем все виды пробельных символов и приводим к нижнему регистру.
+pub fn normalize(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Корректное усреднение только положительных чисел.
+pub fn average_positive(values: &[i64]) -> f64 {
+    let positives: Vec<i64> = values.iter().copied().filter(|v| *v > 0).collect();
+    if positives.is_empty() {
+        return 0.0;
+    }
+    let sum: i64 = positives.iter().sum();
+    sum as f64 / positives.len() as f64
+}
+
+
+# /Users/laztrex/Downloads/reference-app/src/algo.rs
+use std::collections::HashSet;
+
+/// Линейная по времени и памяти: сохраняет первый порядок уникальных элементов.
+pub fn fast_dedup(values: &[u64]) -> Vec<u64> {
+    let mut seen = HashSet::with_capacity(values.len());
+    let mut out = Vec::with_capacity(values.len());
+    for &v in values {
+        if seen.insert(v) {
+            out.push(v);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Линейная итеративная версия числа Фибоначчи.
+pub fn fast_fib(n: u64) -> u64 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => {
+            let mut a = 0;
+            let mut b = 1;
+            for _ in 2..=n {
+                let next = a + b;
+                a = b;
+                b = next;
+            }
+            b
+        }
+    }
+}
+
+
+# /Users/laztrex/Downloads/reference-app/src/bin/demo.rs
+use reference_app::{algo, leak_buffer, normalize, sum_even};
+
+fn main() {
+    let nums = [1, 2, 3, 4];
+    println!("sum_even: {}", sum_even(&nums));
+
+    let data = [1_u8, 0, 2, 3];
+    println!("non-zero bytes: {}", leak_buffer(&data));
+
+    let text = " Hello\tWorld ";
+    println!("normalize: {}", normalize(text));
+
+    let fib = algo::fast_fib(20);
+    println!("fib(20): {}", fib);
+
+    let uniq = algo::fast_dedup(&[1, 2, 2, 3, 1, 4, 4]);
+    println!("dedup: {:?}", uniq);
+}
+
+
